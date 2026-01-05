@@ -3,6 +3,8 @@ import yfinance as yf
 import pandas as pd
 import plotly.express as px
 import datetime
+import requests
+from fake_useragent import UserAgent
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Macro Sector Map", layout="wide", page_icon="🌎")
@@ -15,27 +17,39 @@ SECTORS = {
     'XLC': 'Comm Services', 'XLU': 'Utilities', 'SPY': 'S&P 500 (Market)'
 }
 
-# --- 3. MATH ENGINE (Cached) ---
-@st.cache_data(ttl=3600) # Caches data for 1 hour to prevent API spam
+# --- 3. SESSION BUILDER (Anti-Blocking) ---
+def get_session():
+    """Creates a session that impersonates a real Chrome browser."""
+    session = requests.Session()
+    ua = UserAgent()
+    session.headers.update({
+        'User-Agent': ua.chrome,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Connection': 'keep-alive',
+    })
+    return session
+
+# --- 4. MATH ENGINE (Cached & Fortified) ---
+@st.cache_data(ttl=3600)
 def fetch_market_data():
     results = []
+    session = get_session() # Initialize the "Stealth" session
     
-    # Batch download is faster, but we iterate to handle specific failures gracefully per PRD
     for ticker, name in SECTORS.items():
         try:
-            df = yf.download(ticker, period="1y", interval="1d", progress=False)
+            # Pass the custom session to yf to bypass Yahoo blocks
+            df = yf.download(ticker, period="1y", interval="1d", progress=False, session=session)
             
-            # Data Validation
             if df.empty or len(df) < 200:
                 continue
 
-            # Handle MultiIndex columns if present
+            # Handle MultiIndex logic
             if isinstance(df.columns, pd.MultiIndex):
                 df = df.xs(ticker, axis=1, level=1) if ticker in df.columns.levels[1] else df
                 if 'Close' not in df.columns and len(df.columns) == 1:
-                     df.columns = ['Close'] # Fallback
+                     df.columns = ['Close']
             
-            # Extract Close series correctly
             closes = df['Close'] if 'Close' in df.columns else df.iloc[:, 0]
             
             # --- CALCULATIONS ---
@@ -56,27 +70,26 @@ def fetch_market_data():
             results.append({
                 "Ticker": ticker,
                 "Name": name,
-                "Price": float(curr), # Ensure float for serialization
+                "Price": float(curr),
                 "Z-Score": float(z),
                 "Regime": regime,
                 "Pct_Above_200": float((curr / sma200) - 1)
             })
         except Exception as e:
-            continue # Skip broken tickers without crashing
+            continue
             
     return pd.DataFrame(results)
 
-# --- 4. MAIN UI ---
+# --- 5. MAIN UI ---
 def main():
     st.title("🌎 Sector Momentum Map")
     st.markdown(f"**Status:** Market Scan @ {datetime.datetime.now().strftime('%H:%M ET')}")
     st.info("💡 **Strategy:** Buy stocks only if their Sector is **BULL** or **Oversold (Z < -2.0)**.")
 
     if st.button("🔄 Refresh Data"):
-        st.cache_data.clear() # Allow manual refresh
+        st.cache_data.clear()
 
-    # Load Data
-    with st.spinner("Scanning Sectors..."):
+    with st.spinner("Scanning Sectors (Stealth Mode)..."):
         df = fetch_market_data()
 
     if not df.empty:
@@ -85,7 +98,7 @@ def main():
         # A. Heatmap Chart
         fig = px.bar(
             df, x="Ticker", y="Z-Score", color="Z-Score",
-            color_continuous_scale="RdYlGn_r", # Red=High(Overbought), Green=Low(Oversold)
+            color_continuous_scale="RdYlGn_r",
             title="Sector Z-Scores (Mean Reversion)",
             hover_data=["Name", "Regime"],
             text_auto='.2f'
@@ -112,7 +125,7 @@ def main():
             height=500
         )
     else:
-        st.error("Failed to fetch data. Check your internet connection or API limits.")
+        st.error("Data Fetch Failed. The server may be blocking the connection.")
 
 if __name__ == "__main__":
     main()
