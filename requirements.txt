@@ -1,8 +1,5 @@
 streamlit
-yfinance>=0.2.40
 pandas
 plotly
 scipy
 curl_cffi
-requests
-fake-useragent
