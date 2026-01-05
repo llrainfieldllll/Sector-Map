@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 from curl_cffi import requests as crequests
 import datetime
-import pytz # Added for accurate Toronto Time (DST aware)
+import pytz
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Macro Sector Map", layout="wide", page_icon="🌎")
@@ -67,6 +67,8 @@ def get_signal_rating(row):
 
 def process_market_data():
     results = []
+    last_valid_date = None # Store the date of the data
+    
     my_bar = st.progress(0, text="Establishing Secure Connection...")
     
     total = len(SECTORS)
@@ -74,6 +76,10 @@ def process_market_data():
         closes = get_raw_data(ticker)
         
         if closes is not None and len(closes) > 200:
+            # Capture the last date from the data itself
+            if last_valid_date is None:
+                last_valid_date = closes.index[-1]
+            
             curr = closes.iloc[-1]
             sma50 = closes.rolling(50).mean().iloc[-1]
             sma200 = closes.rolling(200).mean().iloc[-1]
@@ -100,24 +106,31 @@ def process_market_data():
         cols = ['Ticker', 'Signal', 'Z-Score', 'Regime', 'Price', 'Name', 'Pct_Above_200']
         df = df[cols]
         
-    return df
+    return df, last_valid_date
 
 # --- 5. MAIN UI ---
 def main():
     st.title("🌎 Sector Momentum Map")
     
-    # --- FINAL DATE FIX: Automatic Toronto Time (DST-Aware) ---
+    # 1. Calculate Scan Time (Execution Time)
     toronto_tz = pytz.timezone('America/Toronto')
     scan_time = datetime.datetime.now(toronto_tz)
-    st.markdown(f"**Status:** Market Scan @ {scan_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    # -----------------------------------------------------------
-
+    
     st.info("💡 **How to Read:** Look for **⭐⭐ (Stars)** in the table below. Hover over the **'Trade Setup'** column header for the logic.")
 
     if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
 
-    df = process_market_data()
+    # 2. Run Scan & Get Data Date
+    df, data_date = process_market_data()
+
+    # 3. Format Data Date
+    data_date_str = "Unknown"
+    if data_date:
+        data_date_str = data_date.strftime('%Y-%m-%d') # Shows the actual close date (e.g. Friday)
+
+    # 4. Display Dual Status Line
+    st.markdown(f"**Scan Status:** Executed @ {scan_time.strftime('%H:%M:%S %Z')} | **Data Valid As Of:** Market Close {data_date_str}")
 
     if not df.empty:
         df = df.sort_values(by="Z-Score", ascending=False)
@@ -126,7 +139,7 @@ def main():
         fig = px.bar(
             df, x="Ticker", y="Z-Score", color="Z-Score",
             color_continuous_scale="RdYlGn_r",
-            title="Sector Z-Scores (Mean Reversion)",
+            title=f"Sector Z-Scores (Data: {data_date_str})",
             hover_data=["Name", "Regime"], text_auto='.2f'
         )
         fig.add_hline(y=2.0, line_dash="dash", line_color="red", annotation_text="Overheated")
