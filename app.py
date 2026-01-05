@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.express as px
 from curl_cffi import requests as crequests # The "Nuclear" Browser Spoofer
 import datetime
@@ -51,6 +50,32 @@ def get_raw_data(ticker):
     except Exception as e:
         return None
 
+# --- 4. THE SIGNAL BRAIN (ADHD Optimized) ---
+def get_signal_rating(row):
+    """
+    Classifies setups based on Confluence (Trend + Math).
+    Returns a Visual Rating (Emoji) to bypass analysis paralysis.
+    """
+    z = row['Z-Score']
+    regime = row['Regime']
+    
+    # 1. THE GOLDEN SETUP (Bullish Trend + Pullback)
+    if regime == "BULL":
+        if z < -2.0: return "⭐⭐⭐ (Prime)"    # Deep Discount in Uptrend
+        if z < -1.0: return "⭐⭐ (Watch)"      # Standard Pullback
+        if z > 2.0:  return "✋ (Hot)"         # Overextended
+    
+    # 2. THE TRAP (Bearish Trend + Cheap Price)
+    if regime == "BEAR":
+        if z < -2.0: return "⛔ (Trap)"        # Falling Knife
+        if z > 1.5:  return "📉 (Short?)"      # Bear Market Rally (Advanced)
+
+    # 3. RECOVERY (Choppy)
+    if regime == "RECOVERY":
+        return "⚠️ (Mixed)"
+        
+    return "❄️ (Wait)" # No edge
+
 def process_market_data():
     results = []
     progress_text = "Establishing Secure Connection..."
@@ -89,13 +114,25 @@ def process_market_data():
         my_bar.progress((i + 1) / total, text=f"Scanning {ticker}...")
         
     my_bar.empty()
-    return pd.DataFrame(results)
+    
+    # --- DATAFRAME CONSTRUCTION ---
+    df = pd.DataFrame(results)
+    
+    if not df.empty:
+        # Apply The Signal Logic
+        df['Signal'] = df.apply(get_signal_rating, axis=1)
+        
+        # Reorder columns: Signal FIRST for instant visibility
+        cols = ['Ticker', 'Signal', 'Z-Score', 'Regime', 'Price', 'Name', 'Pct_Above_200']
+        df = df[cols]
+        
+    return df
 
-# --- 4. MAIN UI ---
+# --- 5. MAIN UI ---
 def main():
     st.title("🌎 Sector Momentum Map")
     st.markdown(f"**Status:** Market Scan @ {datetime.datetime.now().strftime('%H:%M ET')}")
-    st.info("💡 **Strategy:** Buy stocks only if their Sector is **BULL** or **Oversold (Z < -2.0)**.")
+    st.info("💡 **How to Read:** Look for **⭐⭐ (Stars)**. Avoid **⛔ (Traps)**.")
 
     if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
@@ -118,7 +155,7 @@ def main():
         fig.add_hline(y=-2.0, line_dash="dash", line_color="green", annotation_text="Buy Zone")
         st.plotly_chart(fig, use_container_width=True)
 
-        # B. Scorecard Table
+        # B. Scorecard Table with Signals
         def color_regime(val):
             colors = {'BULL': '#d4edda', 'RECOVERY': '#fff3cd', 'BEAR': '#f8d7da'}
             text_colors = {'BULL': '#155724', 'RECOVERY': '#856404', 'BEAR': '#721c24'}
@@ -128,12 +165,22 @@ def main():
             color = 'red' if val > 2.0 else ('green' if val < -2.0 else 'black')
             return f'color: {color}; font-weight: bold'
 
+        def color_signal(val):
+            if "⭐⭐" in val: return 'color: #28a745; font-weight: bold; font-size: 1.1em' # Green
+            if "⛔" in val: return 'color: #dc3545; font-weight: bold' # Red
+            if "✋" in val: return 'color: #fd7e14; font-weight: bold' # Orange
+            return 'color: gray'
+
         st.dataframe(
             df.style.map(color_regime, subset=['Regime'])
                     .map(color_z, subset=['Z-Score'])
+                    .map(color_signal, subset=['Signal'])
                     .format({"Price": "${:.2f}", "Z-Score": "{:.2f}σ", "Pct_Above_200": "{:.1%}"}),
             use_container_width=True,
-            height=500
+            height=600,
+            column_config={
+                "Signal": st.column_config.TextColumn("Trade Setup", width="medium", help="⭐⭐⭐ = Prime Bullish Entry, ⛔ = Bearish Trap")
+            }
         )
     else:
         st.error("Critical Failure: Even the heavy armor was blocked. Try deploying locally.")
