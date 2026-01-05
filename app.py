@@ -1,10 +1,9 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
+import numpy as np
 import plotly.express as px
+from curl_cffi import requests as crequests # The "Nuclear" Browser Spoofer
 import datetime
-import requests
-from fake_useragent import UserAgent
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Macro Sector Map", layout="wide", page_icon="🌎")
@@ -17,42 +16,52 @@ SECTORS = {
     'XLC': 'Comm Services', 'XLU': 'Utilities', 'SPY': 'S&P 500 (Market)'
 }
 
-# --- 3. SESSION BUILDER (Anti-Blocking) ---
-def get_session():
-    """Creates a session that impersonates a real Chrome browser."""
-    session = requests.Session()
-    ua = UserAgent()
-    session.headers.update({
-        'User-Agent': ua.chrome,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Connection': 'keep-alive',
-    })
-    return session
-
-# --- 4. MATH ENGINE (Cached & Fortified) ---
+# --- 3. THE "NUCLEAR" FETCH ENGINE (Direct API) ---
 @st.cache_data(ttl=3600)
-def fetch_market_data():
-    results = []
-    session = get_session() # Initialize the "Stealth" session
-    
-    for ticker, name in SECTORS.items():
-        try:
-            # Pass the custom session to yf to bypass Yahoo blocks
-            df = yf.download(ticker, period="1y", interval="1d", progress=False, session=session)
+def get_raw_data(ticker):
+    """
+    Bypasses yfinance library entirely. 
+    Uses curl_cffi to impersonate Chrome 110 and fetch raw JSON from Yahoo.
+    """
+    try:
+        # Yahoo's Raw Chart API Endpoint
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range=2y&interval=1d"
+        
+        # The Heavy Lifter: Impersonate a real browser TLS fingerprint
+        r = crequests.get(url, impersonate="chrome110", timeout=10)
+        
+        if r.status_code != 200:
+            return None
             
-            if df.empty or len(df) < 200:
-                continue
+        # Parse JSON
+        data = r.json()
+        result = data['chart']['result'][0]
+        
+        # Extract Timestamps and Closes
+        timestamps = result['timestamp']
+        closes = result['indicators']['quote'][0]['close']
+        
+        # Create DataFrame
+        df = pd.DataFrame({'Close': closes, 'Timestamp': timestamps})
+        df['Date'] = pd.to_datetime(df['Timestamp'], unit='s')
+        df.set_index('Date', inplace=True)
+        df = df.dropna()
+        
+        return df['Close']
+    except Exception as e:
+        return None
 
-            # Handle MultiIndex logic
-            if isinstance(df.columns, pd.MultiIndex):
-                df = df.xs(ticker, axis=1, level=1) if ticker in df.columns.levels[1] else df
-                if 'Close' not in df.columns and len(df.columns) == 1:
-                     df.columns = ['Close']
-            
-            closes = df['Close'] if 'Close' in df.columns else df.iloc[:, 0]
-            
-            # --- CALCULATIONS ---
+def process_market_data():
+    results = []
+    progress_text = "Establishing Secure Connection..."
+    my_bar = st.progress(0, text=progress_text)
+    
+    total = len(SECTORS)
+    for i, (ticker, name) in enumerate(SECTORS.items()):
+        closes = get_raw_data(ticker)
+        
+        if closes is not None and len(closes) > 200:
+            # --- MATH ENGINE ---
             curr = closes.iloc[-1]
             sma50 = closes.rolling(50).mean().iloc[-1]
             sma200 = closes.rolling(200).mean().iloc[-1]
@@ -75,12 +84,14 @@ def fetch_market_data():
                 "Regime": regime,
                 "Pct_Above_200": float((curr / sma200) - 1)
             })
-        except Exception as e:
-            continue
-            
+        
+        # Update Progress
+        my_bar.progress((i + 1) / total, text=f"Scanning {ticker}...")
+        
+    my_bar.empty()
     return pd.DataFrame(results)
 
-# --- 5. MAIN UI ---
+# --- 4. MAIN UI ---
 def main():
     st.title("🌎 Sector Momentum Map")
     st.markdown(f"**Status:** Market Scan @ {datetime.datetime.now().strftime('%H:%M ET')}")
@@ -89,8 +100,8 @@ def main():
     if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
 
-    with st.spinner("Scanning Sectors (Stealth Mode)..."):
-        df = fetch_market_data()
+    # Run the "Nuclear" Scan
+    df = process_market_data()
 
     if not df.empty:
         df = df.sort_values(by="Z-Score", ascending=False)
@@ -125,7 +136,7 @@ def main():
             height=500
         )
     else:
-        st.error("Data Fetch Failed. The server may be blocking the connection.")
+        st.error("Critical Failure: Even the heavy armor was blocked. Try deploying locally.")
 
 if __name__ == "__main__":
     main()
