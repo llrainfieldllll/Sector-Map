@@ -6,7 +6,7 @@ from scipy.stats import percentileofscore, t
 from curl_cffi import requests as crequests
 
 # --- CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Quant Scanner v21.0", page_icon="🛡️")
+st.set_page_config(layout="wide", page_title="Quant Scanner v21.2", page_icon="🛡️")
 
 # --- CUSTOM CSS ---
 st.markdown("""
@@ -16,9 +16,10 @@ st.markdown("""
     .matrix-table td { padding: 12px; border-bottom: 1px solid #ddd; color: #333; font-size: 14px; }
     .row-bull { background-color: #e6fffa; border-left: 5px solid #00cc99; font-weight: bold; }
     .row-bear { background-color: #fff5f5; border-left: 5px solid #ff3333; font-weight: bold; }
+    .row-rejection { background-color: #fff0f0; border-left: 5px solid #cc0000; font-weight: bold; }
     .row-neut { background-color: #f9f9f9; border-left: 5px solid #999; font-weight: bold; }
     .row-plain { background-color: #fff; color: #666; }
-    div[data-testid="stMetricValue"] { font-size: 26px !important; font-weight: 700 !important; }
+    div[data-testid="stMetricValue"] { font-size: 24px !important; font-weight: 700 !important; }
     .trend-pill { padding: 4px 12px; border-radius: 16px; font-size: 14px; font-weight: bold; color: white; display: inline-block; margin-right: 8px; }
     .pill-green { background-color: #00cc99; }
     .pill-yellow { background-color: #ffcc00; color: #333; }
@@ -52,15 +53,11 @@ def fetch_data(ticker):
         closes = quote.get('close')
         if not timestamps or not closes: return None, "Empty dataset"
         
-        # --- SENIOR DEV FIX: ARRAY SAFETY ---
-        # Ensure Highs and Volumes match Closes length exactly
         highs = quote.get('high')
-        if not highs or len(highs) != len(closes): 
-            highs = closes # Fallback to close if high is missing to prevent crash
+        if not highs or len(highs) != len(closes): highs = closes 
 
         volumes = quote.get('volume')
-        if not volumes or len(volumes) != len(closes): 
-            volumes = [0] * len(closes)
+        if not volumes or len(volumes) != len(closes): volumes = [0] * len(closes)
 
         df = pd.DataFrame({
             'Date': pd.to_datetime(timestamps, unit='s'),
@@ -69,7 +66,6 @@ def fetch_data(ticker):
             'Volume': volumes
         })
         df.set_index('Date', inplace=True)
-        # Drop rows with NaNs to keep math clean
         df.dropna(subset=['Close', 'High'], inplace=True)
         return df, None
     except Exception as e:
@@ -77,14 +73,13 @@ def fetch_data(ticker):
 
 # --- QUANT ENGINE ---
 def calculate_metrics(df):
-    # Base Math (Using Closes)
     df['Mean_20'] = df['Close'].rolling(window=20).mean()
     df['Std_20'] = df['Close'].rolling(window=20).std()
     
-    # 1. Main Z-Score
+    # 1. Main Z-Score (Current Close vs 20d)
     df['Z_Close'] = np.where(df['Std_20'] > 0, (df['Close'] - df['Mean_20']) / df['Std_20'], 0)
     
-    # 2. Shadow Z-Score (Intraday Reach)
+    # 2. Shadow Z-Score (Intraday High vs 20d)
     df['Z_High'] = np.where(df['Std_20'] > 0, (df['High'] - df['Mean_20']) / df['Std_20'], 0)
     
     df['SMA_50'] = df['Close'].rolling(window=50).mean()
@@ -108,13 +103,7 @@ def get_signal(z, rank, vol, z_high):
     if pd.isna(z): return "DATA ERROR", "neut", "none"
     safe_rank = 50 if pd.isna(rank) else rank
 
-    # --- LOGIC FIX: SMART REJECTION ---
-    # Only trigger "Rejection" if price failed to hold the high
-    # Logic: High was > 3.0 (Extreme) AND Close fell back significantly (Z < 2.5)
-    # If Z is still > 2.5, it's holding the breakout, so don't call it a rejection.
-    if z_high > 3.0 and z < 2.5: 
-        return "REJECTION WICK (Trap)", "bear", "rejection"
-
+    if z_high > 3.0 and z < 2.5: return "REJECTION WICK (Trap)", "bear", "rejection"
     if z < -2.0 and safe_rank < 5: return "EXTREME OVERSOLD", "bull", "oversold"
     if z > 2.0 and vol > 1.5: return "BREAKOUT DETECTED", "bull", "breakout"
     if z > 2.0 and safe_rank > 95: return "STATISTICAL EXTREME", "bear", "extreme"
@@ -133,9 +122,9 @@ def main():
         st.checkbox("Do I have a predefined Stop Loss?")
         st.checkbox("Am I chasing a green candle?")
         st.divider()
-        st.caption("v21.0 Ironclad Edition")
+        st.caption("v21.2 Absolute Z Patch")
 
-    st.title("🛡️ Quant Scanner v21.0")
+    st.title("🛡️ Quant Scanner v21.2")
     
     col_input, col_rest = st.columns([1, 4])
     with col_input:
@@ -157,7 +146,6 @@ def main():
                 st.session_state.data = calculate_metrics(df)
 
     if st.session_state.data is not None:
-        # UX SAFETY: Mismatch Warning
         if ticker_input != st.session_state.analyzed_ticker:
             st.warning(f"⚠️ **MISMATCH:** Displaying data for **{st.session_state.analyzed_ticker}**. Click 'Run Analysis' to update.")
         
@@ -176,20 +164,21 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-        # --- METRICS ---
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        # --- METRICS (7 Columns) ---
+        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
         c1.metric("Price", f"${cur['Close']:.2f}")
         c2.metric("Trend (20d)", f"${cur['Mean_20']:.2f}")
         c3.metric("Trend (50d)", f"${cur['SMA_50']:.2f}")
-        c4.metric("Z-Score (Close)", f"{cur['Z_Close']:.2f}σ", help="Based on Closing Price")
+        c4.metric("Z-Score (20d Current)", f"{cur['Z_Close']:.2f}σ", help="Current live price vs 20-day average.")
+        c5.metric("Rank (Real)", rank_display, help="Percentile Rank of today's Z-Score against the last year.")
         
-        # Shadow Z-Score Metric
-        delta_shadow = cur['Z_High'] - cur['Z_Close']
-        c5.metric("Intraday Reach", f"${cur['High']:.2f}", 
-                  delta=f"Wick: {delta_shadow:.2f}σ", delta_color="off", 
-                  help="Difference between High and Close in Volatility Units")
+        # --- PATCH: Absolute Z-Score Value ---
+        # Now showing the EXACT Max Z-Score instead of the difference
+        c6.metric("Intraday Reach", f"${cur['High']:.2f}", 
+                  delta=f"Max Z: {cur['Z_High']:.2f}σ", delta_color="off", 
+                  help="The highest Z-Score reached today. If > 3.0, watch for rejection.")
         
-        c6.metric("Vol Ratio", f"{cur['Vol_Ratio']:.1f}x")
+        c7.metric("Vol Ratio", f"{cur['Vol_Ratio']:.1f}x")
         
         st.divider()
 
@@ -234,14 +223,13 @@ def main():
                 fig.add_vline(x=cur['Z_Close'], line_width=3, line_color="#0066FF")
                 fig.add_annotation(x=cur['Z_Close'], y=0.35, text="CLOSE", font=dict(color="#0066FF", size=14, weight="bold"))
                 
-                # Only show Shadow Marker if it's significant (Logic Filter to reduce noise)
                 if cur['Z_High'] > cur['Z_Close'] + 0.5:
                     fig.add_vline(x=cur['Z_High'], line_width=1, line_color="#FF3333", line_dash="dot")
                     fig.add_annotation(x=cur['Z_High'], y=0.25, text="HIGH", font=dict(color="#FF3333", size=12))
 
                 fig.update_layout(
                     template="plotly_white", height=300, margin=dict(t=10, b=20, l=20, r=20),
-                    xaxis_title="Z-Score (20d)", yaxis_title="Density", legend=dict(orientation="h", y=1.02)
+                    xaxis_title="Z-Score (20d Current)", yaxis_title="Density", legend=dict(orientation="h", y=1.02)
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
