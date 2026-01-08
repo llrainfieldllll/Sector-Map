@@ -1,194 +1,183 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
-from curl_cffi import requests as crequests
+import yfinance as yf
+from concurrent.futures import ThreadPoolExecutor
 import datetime
 import pytz
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="Macro Sector Map", layout="wide", page_icon="🌎")
+st.set_page_config(page_title="Quant Sector Map", layout="wide", page_icon="🛡️")
 
-# --- 2. CONSTANTS ---
+# Expanded Sector List for better breadth analysis
 SECTORS = {
     'XLK': 'Technology', 'XLF': 'Financials', 'XLE': 'Energy',
     'XLV': 'Health Care', 'XLY': 'Consumer Disc', 'XLP': 'Consumer Staples',
     'XLI': 'Industrials', 'XLB': 'Materials', 'XLRE': 'Real Estate',
-    'XLC': 'Comm Services', 'XLU': 'Utilities', 'SPY': 'S&P 500 (Market)'
+    'XLC': 'Comm Services', 'XLU': 'Utilities', 'SMH': 'Semiconductors',
+    'SPY': 'S&P 500'
 }
 
-# --- 3. THE "NUCLEAR" FETCH ENGINE (Direct API) ---
-@st.cache_data(ttl=3600)
-def get_raw_data(ticker):
-    """
-    Bypasses yfinance library entirely. 
-    Uses curl_cffi to impersonate Chrome 110 and fetch raw JSON from Yahoo.
-    """
+# --- 2. MATHEMATICAL ENGINE ---
+def calculate_metrics(ticker, name):
     try:
-        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range=2y&interval=1d"
-        r = crequests.get(url, impersonate="chrome110", timeout=10)
+        # RED TEAM FIX: Fetch 2 years to ensure EMA-200 is accurate
+        # Using yfinance is more stable than raw requests
+        df = yf.download(ticker, period="2y", interval="1d", progress=False)
         
-        if r.status_code != 200: return None
+        if df.empty or len(df) < 200:
+            return None
             
-        data = r.json()
-        result = data['chart']['result'][0]
-        timestamps = result['timestamp']
-        closes = result['indicators']['quote'][0]['close']
+        # Standardize columns (yfinance structure varies)
+        if isinstance(df.columns, pd.MultiIndex):
+            df = df.xs('Close', axis=1, level=1)
+        else:
+            df = df['Close']
+            
+        # --- MATH AUDIT ---
+        curr_price = float(df.iloc[-1])
         
-        df = pd.DataFrame({'Close': closes, 'Timestamp': timestamps})
-        df['Date'] = pd.to_datetime(df['Timestamp'], unit='s')
-        df.set_index('Date', inplace=True)
-        df = df.dropna()
+        # 1. Trend Filter (EMA > SMA for speed)
+        ema_50 = df.ewm(span=50, adjust=False).mean().iloc[-1]
+        ema_200 = df.ewm(span=200, adjust=False).mean().iloc[-1]
         
-        return df['Close']
-    except Exception:
+        # 2. Volatility Normalization (Z-Score)
+        # Using 20-day Lookback (Short-term Mean Reversion)
+        roll = df.rolling(20)
+        mu = roll.mean().iloc[-1]
+        sigma = roll.std().iloc[-1]
+        
+        # Avoid division by zero
+        if sigma == 0: sigma = 0.001
+            
+        z_score = (curr_price - mu) / sigma
+        
+        # 3. Percentile Rank (Non-Parametric Verification)
+        # Checks where current Z-score sits relative to last 6 months of Z-scores
+        # This confirms if a "2.0" is actually rare for THIS specific stock
+        past_z = (df - df.rolling(20).mean()) / df.rolling(20).std()
+        recent_z = past_z.tail(126).dropna() # Last 6 months
+        if not recent_z.empty:
+            percentile = (recent_z < z_score).mean() * 100
+        else:
+            percentile = 50.0
+
+        # --- LOGIC GATES ---
+        regime = "NEUTRAL"
+        # Golden Alignment: Price > 200 AND 50 > 200 (Strong Trend)
+        if curr_price > ema_200 and ema_50 > ema_200:
+            regime = "BULL"
+        # Death Alignment: Price < 200 AND 50 < 200 (Strong Downtrend)
+        elif curr_price < ema_200 and ema_50 < ema_200:
+            regime = "BEAR"
+        elif curr_price > ema_200:
+            regime = "RECOVERY" # Price above 200, but moving averages not aligned
+            
+        return {
+            "Ticker": ticker,
+            "Name": name,
+            "Price": curr_price,
+            "Z_Score": z_score,
+            "Pct_Rank": percentile,
+            "Regime": regime,
+            "EMA_200": ema_200
+        }
+    except Exception as e:
         return None
 
-# --- 4. THE SIGNAL BRAIN ---
 def get_signal_rating(row):
-    z = row['Z-Score']
+    z = row['Z_Score']
+    p = row['Pct_Rank']
     regime = row['Regime']
     
-    # BULL TREND
-    if regime == "BULL":
-        if z < -2.0: return "⭐⭐⭐ (Prime)"
-        if z < -1.0: return "⭐⭐ (Watch)"
-        if z > 2.0:  return "✋ (Hot)"
+    # RED TEAM LOGIC: Confluence of Parametric (Z) and Non-Parametric (Percentile)
     
-    # BEAR TREND
+    if regime == "BULL":
+        # Pullback in Uptrend
+        if z < -2.0 and p < 5: return "⭐⭐⭐ (Prime)" # Rare (<5% occurrence)
+        if z < -1.0: return "⭐⭐ (Watch)"
+        if z > 2.5: return "✋ (Extended)"
+        
     if regime == "BEAR":
-        if z < -2.0: return "⛔ (Trap)"
-        if z > 1.5:  return "📉 (Short?)"
-
-    # RECOVERY
-    if regime == "RECOVERY":
-        return "⚠️ (Mixed)"
+        # Rally in Downtrend
+        if z > 1.5: return "📉 (Short Setup)"
+        if z < -2.0: return "⛔ (Knife)"
         
     return "❄️ (Wait)"
 
-def process_market_data():
+# --- 3. PARALLEL EXECUTION ---
+def run_scan():
     results = []
-    last_valid_date = None # Store the date of the data
-    
-    my_bar = st.progress(0, text="Establishing Secure Connection...")
-    
-    total = len(SECTORS)
-    for i, (ticker, name) in enumerate(SECTORS.items()):
-        closes = get_raw_data(ticker)
+    # RED TEAM FIX: Non-blocking I/O
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(calculate_metrics, t, n): t for t, n in SECTORS.items()}
         
-        if closes is not None and len(closes) > 200:
-            # Capture the last date from the data itself
-            if last_valid_date is None:
-                last_valid_date = closes.index[-1]
-            
-            curr = closes.iloc[-1]
-            sma50 = closes.rolling(50).mean().iloc[-1]
-            sma200 = closes.rolling(200).mean().iloc[-1]
-            mu = closes.rolling(20).mean().iloc[-1]
-            sigma = closes.rolling(20).std().iloc[-1]
-            z = (curr - mu) / sigma if sigma > 1e-6 else 0
-            
-            regime = "BEAR"
-            if curr > sma200: regime = "BULL"
-            elif curr > sma50: regime = "RECOVERY"
-            
-            results.append({
-                "Ticker": ticker, "Name": name, "Price": float(curr),
-                "Z-Score": float(z), "Regime": regime,
-                "Pct_Above_200": float((curr / sma200) - 1)
-            })
-        my_bar.progress((i + 1) / total, text=f"Scanning {ticker}...")
-        
-    my_bar.empty()
+        for future in futures:
+            res = future.result()
+            if res:
+                results.append(res)
+                
+    return pd.DataFrame(results)
+
+# --- 4. UI ---
+def main():
+    st.title("🛡️ Red-Teamed Momentum Map")
     
-    df = pd.DataFrame(results)
+    col1, col2 = st.columns([3,1])
+    with col1:
+        st.markdown("Math-Verified Swing Trading Dashboard")
+    with col2:
+        if st.button("🚀 Run Audit"):
+            st.cache_data.clear()
+
+    # Execution
+    with st.spinner("Calculating Volatility Surfaces..."):
+        df = run_scan()
+
     if not df.empty:
         df['Signal'] = df.apply(get_signal_rating, axis=1)
-        cols = ['Ticker', 'Signal', 'Z-Score', 'Regime', 'Price', 'Name', 'Pct_Above_200']
-        df = df[cols]
         
-    return df, last_valid_date
-
-# --- 5. MAIN UI ---
-def main():
-    st.title("🌎 Sector Momentum Map")
-    
-    # 1. Calculate Scan Time (Execution Time)
-    toronto_tz = pytz.timezone('America/Toronto')
-    scan_time = datetime.datetime.now(toronto_tz)
-    
-    st.info("💡 **How to Read:** Look for **⭐⭐ (Stars)** in the table below. Hover over the **'Trade Setup'** column header for the logic.")
-
-    if st.button("🔄 Refresh Data"):
-        st.cache_data.clear()
-
-    # 2. Run Scan & Get Data Date
-    df, data_date = process_market_data()
-
-    # 3. Format Data Date
-    data_date_str = "Unknown"
-    if data_date:
-        data_date_str = data_date.strftime('%Y-%m-%d') # Shows the actual close date (e.g. Friday)
-
-    # 4. Display Dual Status Line
-    st.markdown(f"**Scan Status:** Executed @ {scan_time.strftime('%H:%M:%S %Z')} | **Data Valid As Of:** Market Close {data_date_str}")
-
-    if not df.empty:
-        df = df.sort_values(by="Z-Score", ascending=False)
-
-        # Heatmap
+        # Sort by Z-Score for Heatmap
+        df = df.sort_values(by="Z_Score", ascending=False)
+        
+        # --- VISUALIZATION ---
+        # 1. Z-Score Heatmap
         fig = px.bar(
-            df, x="Ticker", y="Z-Score", color="Z-Score",
+            df, x="Ticker", y="Z_Score", color="Z_Score",
             color_continuous_scale="RdYlGn_r",
-            title=f"Sector Z-Scores (Data: {data_date_str})",
-            hover_data=["Name", "Regime"], text_auto='.2f'
+            title="Standard Deviation from 20-Day Mean",
+            hover_data=["Name", "Regime", "Pct_Rank"], text_auto='.2f'
         )
-        fig.add_hline(y=2.0, line_dash="dash", line_color="red", annotation_text="Overheated")
-        fig.add_hline(y=-2.0, line_dash="dash", line_color="green", annotation_text="Buy Zone")
+        # Statistical Bounds
+        fig.add_hline(y=2.0, line_dash="dot", line_color="red", annotation_text="+2σ (95%)")
+        fig.add_hline(y=-2.0, line_dash="dot", line_color="green", annotation_text="-2σ (5%)")
         st.plotly_chart(fig, use_container_width=True)
-
-        # Styling
-        def color_regime(val):
-            colors = {'BULL': '#d4edda', 'RECOVERY': '#fff3cd', 'BEAR': '#f8d7da'}
-            text_colors = {'BULL': '#155724', 'RECOVERY': '#856404', 'BEAR': '#721c24'}
-            return f'background-color: {colors.get(val, "")}; color: {text_colors.get(val, "")}; font-weight: bold'
-
-        def color_z(val):
-            color = 'red' if val > 2.0 else ('green' if val < -2.0 else 'black')
-            return f'color: {color}; font-weight: bold'
-
-        def color_signal(val):
-            if "⭐⭐" in val: return 'color: #28a745; font-weight: bold; font-size: 1.1em'
-            if "⛔" in val: return 'color: #dc3545; font-weight: bold'
-            if "✋" in val: return 'color: #fd7e14; font-weight: bold'
-            return 'color: gray'
-
-        # Tooltip Logic
-        logic_tooltip = """
-        THE SIGNAL LOGIC MATRIX:
-        ✅ BULL TREND (Safe to Buy):
-        ⭐⭐⭐ PRIME = Price is Deeply Oversold (Z < -2.0).
-        ⭐⭐ WATCH = Price is Pulling Back (Z < -1.0).
-        ✋ HOT = Price is Overextended (Z > +2.0). Wait.
         
-        ⚠️ BEAR TREND (Dangerous):
-        ⛔ TRAP = Price is crashing (Z < -2.0). Do not buy.
-        📉 SHORT = Bear Market Rally (Z > +1.5). Likely to fail.
+        # 2. Detailed Data Table
+        st.subheader("Algorithmic Output")
         
-        *Methodology only. Not financial advice.*
-        """
+        # Formatting
+        def highlight_regime(val):
+            colors = {'BULL': '#d4edda', 'BEAR': '#f8d7da', 'RECOVERY': '#fff3cd', 'NEUTRAL': '#e2e3e5'}
+            return f'background-color: {colors.get(val, "white")}; color: black'
 
         st.dataframe(
-            df.style.map(color_regime, subset=['Regime'])
-                    .map(color_z, subset=['Z-Score'])
-                    .map(color_signal, subset=['Signal'])
-                    .format({"Price": "${:.2f}", "Z-Score": "{:.2f}σ", "Pct_Above_200": "{:.1%}"}),
-            use_container_width=True, height=600,
-            column_config={
-                "Signal": st.column_config.TextColumn("Trade Setup", width="medium", help=logic_tooltip)
-            }
+            df[['Ticker', 'Signal', 'Z_Score', 'Pct_Rank', 'Regime', 'Price', 'Name']]
+            .style.map(highlight_regime, subset=['Regime'])
+            .format({
+                "Z_Score": "{:.2f}σ", 
+                "Price": "${:.2f}",
+                "Pct_Rank": "{:.1f}%"
+            }),
+            use_container_width=True,
+            height=600
         )
+        
+        st.caption("Audit Note: 'Prime' signals now require Z-Score < -2.0 AND Historical Percentile < 5%.")
+        
     else:
-        st.error("Critical Failure: Connection Blocked. Try deploying locally.")
+        st.error("Data Feed Error. Check Internet Connection or API Limits.")
 
 if __name__ == "__main__":
     main()
