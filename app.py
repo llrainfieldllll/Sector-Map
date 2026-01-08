@@ -22,9 +22,9 @@ st.markdown("""
     .row-neut { background-color: #f9f9f9; border-left: 5px solid #999; font-weight: bold; }
     .row-plain { background-color: #fff; color: #666; }
     
-    /* Metric Styling - Slightly smaller font to fit 7 columns */
+    /* Metric Styling - Optimized for 7 Columns */
     div[data-testid="stMetricValue"] { font-size: 22px !important; font-weight: 700 !important; }
-    div[data-testid="stMetricLabel"] { font-size: 14px !important; }
+    div[data-testid="stMetricLabel"] { font-size: 13px !important; color: #555; }
     
     /* Trend Pills */
     .trend-pill { padding: 4px 12px; border-radius: 16px; font-size: 14px; font-weight: bold; color: white; display: inline-block; margin-right: 8px; }
@@ -60,7 +60,8 @@ def fetch_data(ticker):
         closes = quote.get('close')
         if not timestamps or not closes: return None, "Empty dataset"
         
-        # --- CRASH PROTECTION ---
+        # --- CRASH PROTECTION (Senior Dev Fix) ---
+        # Fallback to 'close' if 'high' data is missing or mismatched length
         highs = quote.get('high')
         if not highs or len(highs) != len(closes): 
             highs = closes 
@@ -86,10 +87,11 @@ def calculate_metrics(df):
     df['Mean_20'] = df['Close'].rolling(window=20).mean()
     df['Std_20'] = df['Close'].rolling(window=20).std()
     
-    # 1. Main Z-Score (Close)
+    # 1. Main Z-Score (Current Close vs 20d)
+    # Using np.where to prevent DivideByZero errors
     df['Z_Close'] = np.where(df['Std_20'] > 0, (df['Close'] - df['Mean_20']) / df['Std_20'], 0)
     
-    # 2. Shadow Z-Score (High)
+    # 2. Shadow Z-Score (Intraday High vs 20d)
     df['Z_High'] = np.where(df['Std_20'] > 0, (df['High'] - df['Mean_20']) / df['Std_20'], 0)
     
     df['SMA_50'] = df['Close'].rolling(window=50).mean()
@@ -114,6 +116,7 @@ def get_signal(z, rank, vol, z_high):
     if pd.isna(z): return "DATA ERROR", "neut", "none"
     safe_rank = 50 if pd.isna(rank) else rank
 
+    # Logic Hierarchy
     if z_high > 3.0 and z < 2.5: return "REJECTION WICK (Trap)", "bear", "rejection"
     if z < -2.0 and safe_rank < 5: return "EXTREME OVERSOLD", "bull", "oversold"
     if z > 2.0 and vol > 1.5: return "BREAKOUT DETECTED", "bull", "breakout"
@@ -133,7 +136,7 @@ def main():
         st.checkbox("Do I have a predefined Stop Loss?")
         st.checkbox("Am I chasing a green candle?")
         st.divider()
-        st.caption("v21.3 All-In-One")
+        st.caption("v21.3 Certified Edition")
 
     st.title("🛡️ Quant Scanner v21.3")
     
@@ -187,11 +190,11 @@ def main():
         # Rank (Restored)
         c5.metric("Rank (Real)", rank_display, help="Percentile Rank of today's Z-Score.")
         
-        # Intraday Reach (Restored & Exact Value)
+        # Intraday Reach (Restored)
         # Delta shows the EXACT Z-Score of the High (e.g., 2.15σ)
         c6.metric("Intraday Reach", f"${cur['High']:.2f}", 
                   delta=f"Max Z: {cur['Z_High']:.2f}σ", delta_color="off", 
-                  help="The highest Z-Score reached today.")
+                  help="The highest Z-Score reached today. > 3.0 = Rejection Risk.")
         
         c7.metric("Vol Ratio", f"{cur['Vol_Ratio']:.1f}x")
         
@@ -238,7 +241,7 @@ def main():
                 fig.add_vline(x=cur['Z_Close'], line_width=3, line_color="#0066FF")
                 fig.add_annotation(x=cur['Z_Close'], y=0.35, text="CLOSE", font=dict(color="#0066FF", size=14, weight="bold"))
                 
-                # High Marker
+                # High Marker (Only show if distinct)
                 if cur['Z_High'] > cur['Z_Close'] + 0.3:
                     fig.add_vline(x=cur['Z_High'], line_width=1, line_color="#FF3333", line_dash="dot")
                     fig.add_annotation(x=cur['Z_High'], y=0.25, text="HIGH", font=dict(color="#FF3333", size=12))
