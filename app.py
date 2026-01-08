@@ -14,12 +14,18 @@ st.markdown("""
     .matrix-table { width: 100%; border-collapse: collapse; font-family: 'Arial', sans-serif; margin-top: 20px; }
     .matrix-table th { background-color: #000; color: #fff; padding: 12px; text-align: left; font-size: 14px; }
     .matrix-table td { padding: 12px; border-bottom: 1px solid #ddd; color: #333; font-size: 14px; }
+    
+    /* Signal Rows */
     .row-bull { background-color: #e6fffa; border-left: 5px solid #00cc99; font-weight: bold; }
     .row-bear { background-color: #fff5f5; border-left: 5px solid #ff3333; font-weight: bold; }
     .row-rejection { background-color: #fff0f0; border-left: 5px solid #cc0000; font-weight: bold; }
     .row-neut { background-color: #f9f9f9; border-left: 5px solid #999; font-weight: bold; }
     .row-plain { background-color: #fff; color: #666; }
+    
+    /* Metric Styling */
     div[data-testid="stMetricValue"] { font-size: 24px !important; font-weight: 700 !important; }
+    
+    /* Trend Pills */
     .trend-pill { padding: 4px 12px; border-radius: 16px; font-size: 14px; font-weight: bold; color: white; display: inline-block; margin-right: 8px; }
     .pill-green { background-color: #00cc99; }
     .pill-yellow { background-color: #ffcc00; color: #333; }
@@ -53,11 +59,14 @@ def fetch_data(ticker):
         closes = quote.get('close')
         if not timestamps or not closes: return None, "Empty dataset"
         
+        # --- CRASH PROTECTION: Array Alignment ---
         highs = quote.get('high')
-        if not highs or len(highs) != len(closes): highs = closes 
-
+        if not highs or len(highs) != len(closes): 
+            highs = closes # Safety fallback
+            
         volumes = quote.get('volume')
-        if not volumes or len(volumes) != len(closes): volumes = [0] * len(closes)
+        if not volumes or len(volumes) != len(closes): 
+            volumes = [0] * len(closes) # Safety fallback
 
         df = pd.DataFrame({
             'Date': pd.to_datetime(timestamps, unit='s'),
@@ -77,6 +86,7 @@ def calculate_metrics(df):
     df['Std_20'] = df['Close'].rolling(window=20).std()
     
     # 1. Main Z-Score (Current Close vs 20d)
+    # Safety: Check Std_20 > 0 to prevent div/0 errors
     df['Z_Close'] = np.where(df['Std_20'] > 0, (df['Close'] - df['Mean_20']) / df['Std_20'], 0)
     
     # 2. Shadow Z-Score (Intraday High vs 20d)
@@ -88,6 +98,7 @@ def calculate_metrics(df):
     df['Vol_Median'] = df['Volume'].rolling(20).median()
     df['Vol_Ratio'] = np.where(df['Vol_Median'] > 0, df['Volume'] / df['Vol_Median'], 0)
 
+    # Rank Calculation
     df['Z_Rank'] = df['Z_Close'].rolling(252).apply(lambda x: percentileofscore(x, x.iloc[-1]), raw=False)
     
     return df
@@ -103,6 +114,7 @@ def get_signal(z, rank, vol, z_high):
     if pd.isna(z): return "DATA ERROR", "neut", "none"
     safe_rank = 50 if pd.isna(rank) else rank
 
+    # Logic Hierarchy
     if z_high > 3.0 and z < 2.5: return "REJECTION WICK (Trap)", "bear", "rejection"
     if z < -2.0 and safe_rank < 5: return "EXTREME OVERSOLD", "bull", "oversold"
     if z > 2.0 and vol > 1.5: return "BREAKOUT DETECTED", "bull", "breakout"
@@ -122,7 +134,7 @@ def main():
         st.checkbox("Do I have a predefined Stop Loss?")
         st.checkbox("Am I chasing a green candle?")
         st.divider()
-        st.caption("v21.2 Absolute Z Patch")
+        st.caption("v21.2 Gold Candidate")
 
     st.title("🛡️ Quant Scanner v21.2")
     
@@ -169,14 +181,17 @@ def main():
         c1.metric("Price", f"${cur['Close']:.2f}")
         c2.metric("Trend (20d)", f"${cur['Mean_20']:.2f}")
         c3.metric("Trend (50d)", f"${cur['SMA_50']:.2f}")
+        
+        # Z-Score (20d Current)
         c4.metric("Z-Score (20d Current)", f"{cur['Z_Close']:.2f}σ", help="Current live price vs 20-day average.")
+        
+        # Rank (Real)
         c5.metric("Rank (Real)", rank_display, help="Percentile Rank of today's Z-Score against the last year.")
         
-        # --- PATCH: Absolute Z-Score Value ---
-        # Now showing the EXACT Max Z-Score instead of the difference
+        # Intraday Reach (Absolute Value)
         c6.metric("Intraday Reach", f"${cur['High']:.2f}", 
                   delta=f"Max Z: {cur['Z_High']:.2f}σ", delta_color="off", 
-                  help="The highest Z-Score reached today. If > 3.0, watch for rejection.")
+                  help="The highest Z-Score reached today. > 3.0 indicates a potential rejection wick.")
         
         c7.metric("Vol Ratio", f"{cur['Vol_Ratio']:.1f}x")
         
@@ -223,7 +238,8 @@ def main():
                 fig.add_vline(x=cur['Z_Close'], line_width=3, line_color="#0066FF")
                 fig.add_annotation(x=cur['Z_Close'], y=0.35, text="CLOSE", font=dict(color="#0066FF", size=14, weight="bold"))
                 
-                if cur['Z_High'] > cur['Z_Close'] + 0.5:
+                # Logic: Only show HIGH marker if it's noticeably different from CLOSE to avoid clutter
+                if cur['Z_High'] > cur['Z_Close'] + 0.3:
                     fig.add_vline(x=cur['Z_High'], line_width=1, line_color="#FF3333", line_dash="dot")
                     fig.add_annotation(x=cur['Z_High'], y=0.25, text="HIGH", font=dict(color="#FF3333", size=12))
 
